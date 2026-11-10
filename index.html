@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Cloudline Arcade</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600;700&family=Noto+Sans+KR:wght@500;700&display=swap">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1a33; touch-action: none; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// ===== 공통 =====
+const C = document.getElementById('c'), X = C.getContext('2d');
+let W = 0, H = 0;
+function resize() { const d = devicePixelRatio || 1; W = innerWidth; H = innerHeight; C.width = W * d; C.height = H * d; X.setTransform(d, 0, 0, d, 0, 0); }
+addEventListener('resize', resize); resize();
+
+const PAL = { sky1: '#0e1a33', sky2: '#3a2f5b', dusk: '#b8644a', sun: '#f2a65a', hud: '#9be7c4', foe: '#e5484d', cream: '#f4efe6', gold: '#f2c94c' };
+const FD = '"Chakra Petch", "Noto Sans KR", sans-serif', FK = '"Noto Sans KR", system-ui, sans-serif';
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const angDiff = (a, b) => Math.atan2(Math.sin(b - a), Math.cos(b - a));
+const hash = (i, j) => { const s = Math.sin(i * 127.1 + j * 311.7) * 43758.5453; return s - Math.floor(s); };
+
+function txt(s, x, y, size, col, al = 'center', font = FD) { X.font = `700 ${size}px ${font}`; X.fillStyle = col; X.textAlign = al; X.textBaseline = 'middle'; X.fillText(s, x, y); }
+function skyGrad(y0 = 0, y1 = H) { const g = X.createLinearGradient(0, y0, 0, y1); g.addColorStop(0, PAL.sky1); g.addColorStop(.65, PAL.sky2); g.addColorStop(1, PAL.dusk); X.fillStyle = g; X.fillRect(0, y0, W, y1 - y0); }
+function rr(x, y, w, h, r) { X.beginPath(); X.roundRect ? X.roundRect(x, y, w, h, r) : X.rect(x, y, w, h); }
+
+// 위에서 본 비행기 (기수 = +x 방향)
+function plane(x, y, a, col, s = 1) {
+  X.save(); X.translate(x, y); X.rotate(a); X.scale(s, s); X.fillStyle = col; X.beginPath();
+  X.moveTo(22, 0); X.lineTo(6, -4); X.lineTo(2, -20); X.lineTo(-4, -20); X.lineTo(-4, -4); X.lineTo(-16, -3);
+  X.lineTo(-20, -10); X.lineTo(-24, -10); X.lineTo(-22, 0); X.lineTo(-24, 10); X.lineTo(-20, 10); X.lineTo(-16, 3);
+  X.lineTo(-4, 4); X.lineTo(-4, 20); X.lineTo(2, 20); X.lineTo(6, 4); X.closePath(); X.fill();
+  X.fillStyle = 'rgba(255,255,255,.55)'; X.fillRect(5, -2, 8, 4); X.restore();
+}
+// 뒤에서 본 비행기 (협곡 모드)
+function rearPlane(x, y, bank, s = 1) {
+  X.save(); X.translate(x, y); X.rotate(bank); X.scale(s, s); X.fillStyle = PAL.cream;
+  X.fillRect(-48, -3, 96, 6); X.fillRect(-17, -16, 34, 4);
+  X.beginPath(); X.moveTo(0, -30); X.lineTo(4, 0); X.lineTo(-4, 0); X.fill();
+  X.beginPath(); X.arc(0, 0, 9, 0, 7); X.fill();
+  X.fillStyle = PAL.sun; X.beginPath(); X.arc(0, 0, 4.5, 0, 7); X.fill(); X.restore();
+}
+
+// 파티클
+let parts = [], shake = 0;
+function boom(x, y, col, n = 16, sp = 180) { for (let i = 0; i < n; i++) { const a = rnd(0, 7), v = rnd(20, sp); parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: rnd(.3, .9), col, r: rnd(1.5, 4) }); } }
+function stepParts(dt) { for (const p of parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= .96; p.vy *= .96; p.life -= dt; } parts = parts.filter(p => p.life > 0); }
+function drawParts() { for (const p of parts) { X.globalAlpha = Math.min(1, p.life * 2); X.fillStyle = p.col; X.beginPath(); X.arc(p.x, p.y, p.r, 0, 7); X.fill(); } X.globalAlpha = 1; }
+
+// 입력
+const keys = {}, ptr = { x: 0, y: 0, down: false, on: false, touch: false };
+const axis = () => ({ x: (keys.ArrowRight || keys.KeyD ? 1 : 0) - (keys.ArrowLeft || keys.KeyA ? 1 : 0), y: (keys.ArrowDown || keys.KeyS ? 1 : 0) - (keys.ArrowUp || keys.KeyW ? 1 : 0) });
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (/^(Arrow|Key[WASD])/.test(e.code)) ptr.on = false;
+  if (/^Arrow|Space/.test(e.code)) e.preventDefault();
+  onKey(e.code);
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+C.addEventListener('pointerdown', e => { Object.assign(ptr, { x: e.clientX, y: e.clientY, down: true, on: true, touch: e.pointerType === 'touch' }); onTap(e.clientX, e.clientY); });
+C.addEventListener('pointermove', e => { Object.assign(ptr, { x: e.clientX, y: e.clientY, on: true, touch: e.pointerType === 'touch' }); });
+addEventListener('pointerup', () => { ptr.down = false; });
+addEventListener('pointercancel', () => { ptr.down = false; });
+
+let best = {}; try { best = JSON.parse(localStorage.getItem('cloudline-best')) || {}; } catch {}
+
+function hud(g, hp, maxHp, extra) {
+  txt(String(Math.floor(g.score)).padStart(7, '0'), 18, 28, 26, PAL.cream, 'left');
+  for (let i = 0; i < maxHp; i++) { X.fillStyle = i < hp ? PAL.hud : 'rgba(244,239,230,.18)'; X.fillRect(18 + i * 16, 50, 12, 6); }
+  if (extra) txt(extra, 18, 72, 13, PAL.hud, 'left', FK);
+  const b = menuBtn(); X.strokeStyle = 'rgba(244,239,230,.4)'; X.lineWidth = 1.5; rr(b.x, b.y, b.w, b.h, 6); X.stroke();
+  txt('메뉴', b.x + b.w / 2, b.y + b.h / 2 + 1, 13, PAL.cream, 'center', FK);
+}
+const menuBtn = () => ({ x: W - 74, y: 14, w: 60, h: 30 });
+const inside = (b, x, y) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+
+// ===== 1. 새벽 요격 (종스크롤 슈팅) =====
+const Shooter = {
+  name: 'DAWN INTERCEPT', ko: '새벽 요격', desc: ['몰려오는 편대를 격추하는', '종스크롤 슈팅 · 40초마다 보스'], ctl: '방향키·WASD / 드래그 · 자동 사격',
+  init() {
+    Object.assign(this, { p: { x: W / 2, y: H * .8, hp: 5, inv: 0 }, pw: 1, shots: [], eshots: [], foes: [], items: [], t: 0, score: 0, fire: 0, spawn: 1, boss: null, bossAt: 40, kills: 0,
+      clouds: Array.from({ length: 24 }, () => ({ x: rnd(0, W), y: rnd(0, H), r: rnd(20, 70), v: rnd(30, 90) })) });
+  },
+  aim(x, y, v) { const a = Math.atan2(this.p.y - y, this.p.x - x); this.eshots.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v }); },
+  spawnFoe() {
+    const r = Math.random(), x = rnd(30, W - 30);
+    if (r < .55) this.foes.push({ type: 'scout', x, bx: x, y: -30, vy: rnd(120, 180) + this.t * 2, hp: 1, r: 16, ph: rnd(0, 7), pts: 100, t: 0 });
+    else if (r < .85) this.foes.push({ type: 'gunner', x, y: -30, vy: 150, stop: rnd(80, H * .4), hp: 3, r: 18, cd: rnd(.5, 1.5), pts: 250, life: 5, t: 0 });
+    else this.foes.push({ type: 'heavy', x, y: -40, vy: 60, hp: 10, r: 28, cd: 1.5, pts: 600, t: 0 });
+  },
+  kill(f) {
+    this.score += f.pts; this.kills++; boom(f.x, f.y, PAL.sun, f.r > 20 ? 30 : 16);
+    if (Math.random() < .1) this.items.push({ x: f.x, y: f.y, kind: Math.random() < .6 ? 'P' : 'H' });
+  },
+  hurt() {
+    const p = this.p; p.hp--; p.inv = 1.5; this.pw = Math.max(1, this.pw - 1); shake = 12; boom(p.x, p.y, PAL.foe, 20);
+    if (p.hp <= 0) { this.over = true; boom(p.x, p.y, PAL.sun, 60, 300); }
+  },
+  update(dt) {
+    const p = this.p; this.t += dt;
+    if (ptr.on) { const ty = ptr.y - (ptr.touch ? 70 : 0); p.x += (ptr.x - p.x) * Math.min(1, dt * 14); p.y += (ty - p.y) * Math.min(1, dt * 14); }
+    else { const a = axis(); p.x += a.x * 400 * dt; p.y += a.y * 400 * dt; }
+    p.x = clamp(p.x, 20, W - 20); p.y = clamp(p.y, 90, H - 24); p.inv -= dt;
+
+    this.fire -= dt;
+    if (this.fire <= 0) {
+      this.fire = .11;
+      const add = (dx, ang) => this.shots.push({ x: p.x + dx, y: p.y - 18, vx: Math.sin(ang) * 720, vy: -Math.cos(ang) * 720 });
+      if (this.pw === 1) add(0, 0); else if (this.pw === 2) { add(-7, 0); add(7, 0); } else { add(-7, 0); add(7, 0); add(0, -.2); add(0, .2); }
+    }
+    this.spawn -= dt;
+    if (!this.boss && this.spawn <= 0) { this.spawn = Math.max(.35, 1.1 - this.t * .01); this.spawnFoe(); }
+    if (!this.boss && this.t >= this.bossAt) { const hp = 80 + this.bossAt * 2; this.boss = { x: W / 2, y: -80, ty: 120, hp, max: hp, r: 46, t: 0, shot: 1 }; }
+    const b = this.boss;
+
+    for (const f of this.foes) {
+      f.t += dt;
+      if (f.type === 'scout') { f.y += f.vy * dt; f.x = f.bx + Math.sin(f.t * 3 + f.ph) * 50; }
+      else if (f.type === 'gunner') {
+        if (f.y < f.stop) f.y += f.vy * dt; else { f.life -= dt; if (f.life < 0) f.y += 220 * dt; }
+        f.cd -= dt; if (f.cd <= 0 && f.y > 0) { f.cd = 1.4; this.aim(f.x, f.y, 260); }
+      } else {
+        f.y += f.vy * dt; f.cd -= dt;
+        if (f.cd <= 0 && f.y > 0) { f.cd = 1.8; for (let i = -1; i <= 1; i++) this.eshots.push({ x: f.x, y: f.y + 20, vx: i * 90, vy: 220 }); }
+      }
+    }
+    if (b) {
+      b.t += dt; b.y += (b.ty - b.y) * dt * 1.5; b.x = W / 2 + Math.sin(b.t * .7) * W * .3; b.shot -= dt;
+      if (b.shot <= 0 && b.y > 60) {
+        b.shot = b.hp < b.max / 2 ? .55 : .8;
+        for (let i = 0; i < 14; i++) { const a = b.t + i * Math.PI * 2 / 14; this.eshots.push({ x: b.x, y: b.y, vx: Math.cos(a) * 170, vy: Math.sin(a) * 170 }); }
+        this.aim(b.x, b.y, 300);
+      }
+    }
+    for (const s of this.shots) {
+      s.x += s.vx * dt; s.y += s.vy * dt;
+      for (const f of this.foes) if (f.hp > 0 && (s.x - f.x) ** 2 + (s.y - f.y) ** 2 < f.r * f.r) { s.dead = 1; f.hp--; boom(s.x, s.y, PAL.gold, 2, 60); if (f.hp <= 0) this.kill(f); break; }
+      if (!s.dead && this.boss && (s.x - b.x) ** 2 + (s.y - b.y) ** 2 < b.r * b.r) {
+        s.dead = 1; b.hp--; boom(s.x, s.y, PAL.gold, 2, 60);
+        if (b.hp <= 0) {
+          this.score += 5000; boom(b.x, b.y, PAL.sun, 90, 360); boom(b.x, b.y, PAL.cream, 40, 200); shake = 20;
+          this.items.push({ x: b.x - 20, y: b.y, kind: 'P' }, { x: b.x + 20, y: b.y, kind: 'H' });
+          this.eshots = []; this.boss = null; this.bossAt = this.t + 40;
+        }
+      }
+    }
+    for (const s of this.eshots) {
+      s.x += s.vx * dt; s.y += s.vy * dt;
+      if (p.inv <= 0 && !this.over && (s.x - p.x) ** 2 + (s.y - p.y) ** 2 < 100) { s.dead = 1; this.hurt(); }
+    }
+    for (const f of this.foes) if (f.hp > 0 && p.inv <= 0 && !this.over && (f.x - p.x) ** 2 + (f.y - p.y) ** 2 < (f.r + 10) ** 2) { if (f.type !== 'heavy') { f.hp = 0; this.kill(f); } this.hurt(); }
+    for (const it of this.items) {
+      it.y += 90 * dt;
+      if ((it.x - p.x) ** 2 + (it.y - p.y) ** 2 < 28 * 28) {
+        it.dead = 1;
+        if (it.kind === 'P') { if (this.pw === 3) this.score += 500; this.pw = Math.min(3, this.pw + 1); } else p.hp = Math.min(5, p.hp + 1);
+        boom(it.x, it.y, PAL.hud, 12, 120);
+      }
+    }
+    const on = o => !o.dead && o.y > -100 && o.y < H + 60 && o.x > -60 && o.x < W + 60;
+    this.shots = this.shots.filter(on); this.eshots = this.eshots.filter(on); this.items = this.items.filter(on);
+    this.foes = this.foes.filter(f => f.hp > 0 && f.y < H + 60);
+    for (const c of this.clouds) { c.y += c.v * dt; if (c.y - c.r > H) { c.y = -c.r; c.x = rnd(0, W); } }
+  },
+  draw() {
+    skyGrad();
+    X.fillStyle = 'rgba(244,239,230,.07)';
+    for (const c of this.clouds) { X.beginPath(); X.arc(c.x, c.y, c.r, 0, 7); X.arc(c.x + c.r * .7, c.y + 6, c.r * .7, 0, 7); X.fill(); }
+    for (const it of this.items) {
+      X.fillStyle = it.kind === 'P' ? PAL.gold : PAL.hud; rr(it.x - 12, it.y - 12, 24, 24, 6); X.fill();
+      txt(it.kind, it.x, it.y + 1, 15, PAL.sky1);
+    }
+    for (const f of this.foes) plane(f.x, f.y, Math.PI / 2, f.type === 'heavy' ? '#a8323a' : PAL.foe, f.type === 'heavy' ? 1.5 : f.type === 'gunner' ? 1.05 : .85);
+    const b = this.boss;
+    if (b) {
+      plane(b.x, b.y, Math.PI / 2, '#7d2330', 3);
+      X.fillStyle = 'rgba(244,239,230,.2)'; X.fillRect(W * .2, 96, W * .6, 6);
+      X.fillStyle = PAL.foe; X.fillRect(W * .2, 96, W * .6 * b.hp / b.max, 6);
+      txt('폭격기 접근', W / 2, 86, 12, PAL.foe, 'center', FK);
+    }
+    X.fillStyle = PAL.gold; for (const s of this.shots) X.fillRect(s.x - 1.5, s.y - 7, 3, 14);
+    X.fillStyle = '#ff8a8f'; for (const s of this.eshots) { X.beginPath(); X.arc(s.x, s.y, 4.5, 0, 7); X.fill(); }
+    const p = this.p;
+    if (!this.over && (p.inv <= 0 || Math.floor(p.inv * 12) % 2)) plane(p.x, p.y, -Math.PI / 2, PAL.cream, 1.1);
+    drawParts();
+    hud(this, p.hp, 5, `무기 Lv.${this.pw} · 격추 ${this.kills}`);
+  },
+};
+
+// ===== 2. 협곡 질주 (3D 링 통과) =====
+const Canyon = {
+  name: 'CANYON RUN', ko: '협곡 질주', desc: ['붉은 협곡을 낮게 날며', '링 통과 · 바위 회피 3D 비행'], ctl: '방향키·WASD / 드래그로 조종',
+  init() { Object.assign(this, { px: 0, py: 0, hp: 3, inv: 0, t: 0, score: 0, combo: 0, bestCombo: 0, speed: 700, objs: [], spawn: .5, dist: 0, flash: 0, bank: 0 }); },
+  update(dt) {
+    this.t += dt; this.speed = 700 + this.t * 12; this.dist += this.speed * dt; this.score += dt * 10;
+    const ox = this.px;
+    if (ptr.on) { const tx = (ptr.x / W * 2 - 1) * 240, ty = (ptr.y / H * 2 - 1) * 150; this.px += (tx - this.px) * Math.min(1, dt * 6); this.py += (ty - this.py) * Math.min(1, dt * 6); }
+    else { const a = axis(); this.px += a.x * 320 * dt; this.py += a.y * 260 * dt; }
+    this.px = clamp(this.px, -220, 220); this.py = clamp(this.py, -130, 130);
+    this.bank += (clamp((this.px - ox) / dt * .0025, -.6, .6) - this.bank) * Math.min(1, dt * 8);
+
+    this.spawn -= dt;
+    if (this.spawn <= 0) {
+      this.spawn = Math.max(.25, .7 - this.t * .006);
+      if (Math.random() < .45) this.objs.push({ k: 'ring', x: rnd(-180, 180), y: rnd(-100, 100), z: 3000, r: 60 });
+      else this.objs.push({ k: 'rock', x: rnd(-220, 220), y: rnd(-130, 130), z: 3000, r: rnd(35, 60), seed: rnd(0, 100) });
+    }
+    for (const o of this.objs) {
+      o.z -= this.speed * dt;
+      if (o.z <= 0) {
+        o.done = 1; const d = Math.hypot(o.x - this.px, o.y - this.py);
+        if (o.k === 'ring') {
+          if (d < o.r) { this.combo++; this.bestCombo = Math.max(this.bestCombo, this.combo); this.score += 100 * Math.min(10, this.combo); this.flash = .25; }
+          else this.combo = 0;
+        } else if (d < o.r + 14 && this.inv <= 0) {
+          this.hp--; this.inv = 1.2; this.combo = 0; shake = 14; boom(W / 2, H / 2 + 60, PAL.sun, 30, 260);
+          if (this.hp <= 0) this.over = true;
+        }
+      }
+    }
+    this.objs = this.objs.filter(o => !o.done);
+    this.inv -= dt; this.flash -= dt;
+  },
+  draw() {
+    const F = Math.min(W, H) * .9, cx = this.px, cy = this.py, near = 30, far = 3000;
+    const P = (x, y, z) => [W / 2 + (x - cx) * F / z, H / 2 + (y - cy) * F / z];
+    const poly = (pts, col) => { X.fillStyle = col; X.beginPath(); pts.forEach(([x, y], i) => i ? X.lineTo(x, y) : X.moveTo(x, y)); X.closePath(); X.fill(); };
+    skyGrad(0, H / 2);
+    X.fillStyle = PAL.sun; X.beginPath(); X.arc(W / 2 - cx * .3, H / 2, 60, Math.PI, 0); X.fill();
+    X.fillStyle = '#6e3b2c'; X.fillRect(0, H / 2, W, H / 2);
+    poly([P(-320, 170, far), P(320, 170, far), P(320, 170, near), P(-320, 170, near)], '#8a5236');
+    for (const side of [-1, 1]) {
+      const wx = side * 320;
+      poly([P(wx, -600, far), P(wx, 170, far), P(wx, 170, near), P(wx, -600, near)], side < 0 ? '#5a2c27' : '#4b2421');
+      X.strokeStyle = 'rgba(0,0,0,.25)'; X.lineWidth = 2;
+      for (let z = 250 - this.dist % 250; z < far; z += 250) { if (z < near) continue; const a = P(wx, -600, z), b = P(wx, 170, z); X.beginPath(); X.moveTo(...a); X.lineTo(...b); X.stroke(); }
+    }
+    X.strokeStyle = 'rgba(244,239,230,.12)';
+    for (let z = 200 - this.dist % 200; z < far; z += 200) { if (z < near) continue; const a = P(-320, 170, z), b = P(320, 170, z); X.beginPath(); X.moveTo(...a); X.lineTo(...b); X.stroke(); }
+
+    const sorted = this.objs.filter(o => o.z > 20).sort((a, b) => b.z - a.z);
+    for (const o of sorted) {
+      const [sx, sy] = P(o.x, o.y, o.z), s = F / o.z;
+      X.globalAlpha = clamp((far - o.z) / 500, 0, 1);
+      if (o.k === 'ring') {
+        X.strokeStyle = PAL.gold; X.lineWidth = Math.max(2, 10 * s); X.beginPath(); X.arc(sx, sy, o.r * s, 0, 7); X.stroke();
+        X.strokeStyle = 'rgba(242,201,76,.35)'; X.lineWidth = Math.max(1, 3 * s); X.beginPath(); X.arc(sx, sy, o.r * s * .8, 0, 7); X.stroke();
+      } else {
+        X.fillStyle = '#3b211c'; X.beginPath();
+        for (let i = 0; i < 9; i++) { const a = i / 9 * Math.PI * 2, rr2 = o.r * s * (.8 + hash(o.seed, i) * .35); i ? X.lineTo(sx + Math.cos(a) * rr2, sy + Math.sin(a) * rr2) : X.moveTo(sx + Math.cos(a) * rr2, sy + Math.sin(a) * rr2); }
+        X.closePath(); X.fill();
+        X.fillStyle = 'rgba(242,166,90,.25)'; X.beginPath(); X.arc(sx - o.r * s * .25, sy - o.r * s * .25, o.r * s * .35, 0, 7); X.fill();
+      }
+    }
+    X.globalAlpha = 1;
+    // 조준점 + 기체
+    X.strokeStyle = this.flash > 0 ? PAL.gold : PAL.hud; X.lineWidth = 2;
+    X.beginPath(); X.arc(W / 2, H / 2, 10, 0, 7); X.moveTo(W / 2 - 22, H / 2); X.lineTo(W / 2 - 14, H / 2); X.moveTo(W / 2 + 14, H / 2); X.lineTo(W / 2 + 22, H / 2); X.stroke();
+    if (!this.over && (this.inv <= 0 || Math.floor(this.inv * 12) % 2)) rearPlane(W / 2, H / 2 + 70, this.bank, Math.min(1.2, W / 600));
+    if (this.flash > 0) { X.fillStyle = `rgba(242,201,76,${this.flash * .4})`; X.fillRect(0, 0, W, H); }
+    drawParts();
+    hud(this, this.hp, 3, `속도 ${Math.round(this.speed / 2)} km/h · 링 콤보 ${this.combo}`);
+  },
+};
+
+// ===== 3. 공중전 (360° 탑다운) =====
+const Dogfight = {
+  name: 'SKY DUEL', ko: '공중전', desc: ['360° 자유 비행으로', '적 편대를 추격해 격추'], ctl: '←→ 선회 · ↑↓ 속도 · Space 사격 / 마우스 조종 · 클릭 사격',
+  init() { Object.assign(this, { p: { x: 0, y: 0, a: -Math.PI / 2, v: 260, hp: 6, inv: 0 }, foes: [], shots: [], eshots: [], wave: 0, score: 0, t: 0, cd: 0, msg: 0, trail: 0 }); this.nextWave(); },
+  nextWave() {
+    this.wave++; const p = this.p;
+    for (let i = 0; i < 2 + this.wave; i++) { const a = rnd(0, 7), d = rnd(700, 1000); this.foes.push({ x: p.x + Math.cos(a) * d, y: p.y + Math.sin(a) * d, a: a + Math.PI, v: rnd(200, 240) + this.wave * 8, hp: this.wave > 3 ? 3 : 2, cd: rnd(1, 2), turn: 1.5 + this.wave * .08 }); }
+    this.msg = 2;
+  },
+  update(dt) {
+    const p = this.p, ax = axis(); this.t += dt; this.msg -= dt;
+    if (ptr.on) { const want = Math.atan2(ptr.y - H / 2, ptr.x - W / 2); p.a += clamp(angDiff(p.a, want), -3.2 * dt, 3.2 * dt); }
+    else p.a += ax.x * 3 * dt;
+    p.v = clamp(p.v - ax.y * 200 * dt, 180, 420);
+    p.x += Math.cos(p.a) * p.v * dt; p.y += Math.sin(p.a) * p.v * dt; p.inv -= dt;
+    this.trail -= dt;
+    if (this.trail <= 0) { this.trail = .03; parts.push({ x: p.x - Math.cos(p.a) * 20, y: p.y - Math.sin(p.a) * 20, vx: 0, vy: 0, life: .5, col: 'rgba(244,239,230,.5)', r: 2 }); }
+    this.cd -= dt;
+    if ((keys.Space || ptr.down) && this.cd <= 0) {
+      this.cd = .09; const sp = p.v + 700;
+      this.shots.push({ x: p.x + Math.cos(p.a) * 22, y: p.y + Math.sin(p.a) * 22, vx: Math.cos(p.a) * sp, vy: Math.sin(p.a) * sp, life: .9 });
+    }
+    for (const f of this.foes) {
+      const want = Math.atan2(p.y - f.y, p.x - f.x), d = angDiff(f.a, want), dist = Math.hypot(p.x - f.x, p.y - f.y);
+      f.a += clamp(d, -f.turn * dt, f.turn * dt);
+      f.x += Math.cos(f.a) * f.v * dt; f.y += Math.sin(f.a) * f.v * dt;
+      f.cd -= dt;
+      if (f.cd <= 0 && Math.abs(d) < .25 && dist < 600) { f.cd = rnd(1.2, 2); const sp = f.v + 450; this.eshots.push({ x: f.x, y: f.y, vx: Math.cos(f.a) * sp, vy: Math.sin(f.a) * sp, life: 1.4 }); }
+      if (dist < 28 && p.inv <= 0) { f.hp = 0; this.kill(f); this.hurt(); }
+    }
+    for (const s of this.shots) {
+      s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt;
+      for (const f of this.foes) if (f.hp > 0 && (s.x - f.x) ** 2 + (s.y - f.y) ** 2 < 400) { s.life = 0; f.hp--; boom(s.x, s.y, PAL.gold, 3, 80); if (f.hp <= 0) this.kill(f); break; }
+    }
+    for (const s of this.eshots) {
+      s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt;
+      if (p.inv <= 0 && !this.over && (s.x - p.x) ** 2 + (s.y - p.y) ** 2 < 196) { s.life = 0; this.hurt(); }
+    }
+    this.shots = this.shots.filter(s => s.life > 0); this.eshots = this.eshots.filter(s => s.life > 0);
+    this.foes = this.foes.filter(f => f.hp > 0);
+    if (!this.foes.length && !this.over) { this.score += 1000 * this.wave; this.nextWave(); }
+  },
+  kill(f) { this.score += 300; boom(f.x, f.y, PAL.sun, 26, 220); boom(f.x, f.y, '#555', 10, 80); },
+  hurt() {
+    const p = this.p; p.hp--; p.inv = 1; shake = 12; boom(p.x, p.y, PAL.foe, 16);
+    if (p.hp <= 0) { this.over = true; boom(p.x, p.y, PAL.sun, 60, 300); }
+  },
+  draw() {
+    const p = this.p, ox = W / 2 - p.x, oy = H / 2 - p.y;
+    X.fillStyle = '#1d4766'; X.fillRect(0, 0, W, H);
+    X.strokeStyle = 'rgba(155,231,196,.08)'; X.lineWidth = 1;
+    for (let x = ((ox % 200) + 200) % 200; x < W; x += 200) { X.beginPath(); X.moveTo(x, 0); X.lineTo(x, H); X.stroke(); }
+    for (let y = ((oy % 200) + 200) % 200; y < H; y += 200) { X.beginPath(); X.moveTo(0, y); X.lineTo(W, y); X.stroke(); }
+    X.save(); X.translate(ox, oy);
+    // 바다 위 섬
+    const cell = 600, i0 = Math.floor((p.x - W / 2) / cell) - 1, j0 = Math.floor((p.y - H / 2) / cell) - 1;
+    for (let i = i0; i < i0 + W / cell + 3; i++) for (let j = j0; j < j0 + H / cell + 3; j++) {
+      const h = hash(i, j); if (h < .75) continue;
+      X.fillStyle = '#2f5d4a'; X.beginPath(); X.arc(i * cell + h * 300, j * cell + hash(j, i) * 300, 40 + h * 60, 0, 7); X.fill();
+    }
+    drawParts();
+    X.fillStyle = PAL.gold; for (const s of this.shots) { X.beginPath(); X.arc(s.x, s.y, 2.5, 0, 7); X.fill(); }
+    X.fillStyle = '#ff8a8f'; for (const s of this.eshots) { X.beginPath(); X.arc(s.x, s.y, 4, 0, 7); X.fill(); }
+    for (const f of this.foes) { plane(f.x + 8, f.y + 12, f.a, 'rgba(0,0,0,.25)'); plane(f.x, f.y, f.a, PAL.foe); }
+    if (!this.over && (p.inv <= 0 || Math.floor(p.inv * 12) % 2)) { plane(p.x + 8, p.y + 12, p.a, 'rgba(0,0,0,.25)', 1.1); plane(p.x, p.y, p.a, PAL.cream, 1.1); }
+    // 구름 (기체 위로 지나감)
+    X.fillStyle = 'rgba(244,239,230,.16)';
+    for (let i = i0; i < i0 + W / cell + 3; i++) for (let j = j0; j < j0 + H / cell + 3; j++) {
+      const h = hash(i + 50, j - 30); if (h < .55) continue;
+      const cx = i * cell + h * 500, cy = j * cell + hash(j + 7, i) * 500;
+      X.beginPath(); X.arc(cx, cy, 70, 0, 7); X.arc(cx + 60, cy + 20, 55, 0, 7); X.arc(cx - 50, cy + 25, 50, 0, 7); X.fill();
+    }
+    X.restore();
+    // 레이더
+    const R = 56, rx = W - R - 18, ry = H - R - 18;
+    X.fillStyle = 'rgba(14,26,51,.7)'; X.beginPath(); X.arc(rx, ry, R, 0, 7); X.fill();
+    X.strokeStyle = 'rgba(155,231,196,.4)'; X.beginPath(); X.arc(rx, ry, R, 0, 7); X.arc(rx, ry, R / 2, 0, 7); X.stroke();
+    X.fillStyle = PAL.foe;
+    for (const f of this.foes) { const dx = (f.x - p.x) / 18, dy = (f.y - p.y) / 18, d = Math.hypot(dx, dy), k = d > R - 4 ? (R - 4) / d : 1; X.beginPath(); X.arc(rx + dx * k, ry + dy * k, 3, 0, 7); X.fill(); }
+    X.fillStyle = PAL.cream; X.beginPath(); X.arc(rx, ry, 3, 0, 7); X.fill();
+    if (this.msg > 0) txt(`WAVE ${this.wave}`, W / 2, H * .3, 40, PAL.cream);
+    hud(this, p.hp, 6, `웨이브 ${this.wave} · 남은 적 ${this.foes.length} · 속도 ${Math.round(p.v * 2)} km/h`);
+  },
+};
+
+// ===== 메뉴 / 진행 =====
+const GAMES = [Shooter, Canyon, Dogfight];
+let cur = null, sel = 0, mt = 0;
+const menuClouds = Array.from({ length: 14 }, () => ({ x: Math.random(), y: Math.random(), r: rnd(30, 90), v: rnd(.01, .03) }));
+
+function cardRect(i) {
+  if (W < 760) { const w = Math.min(W - 32, 440), h = 104, top = Math.max(150, H / 2 - 170); return { x: (W - w) / 2, y: top + i * (h + 12), w, h }; }
+  const gap = 20, w = Math.min(300, (W - 64 - gap * 2) / 3), h = 280, x0 = (W - (w * 3 + gap * 2)) / 2;
+  return { x: x0 + i * (w + gap), y: H * .5 - h / 2 + 30, w, h };
+}
+function overBtns() { const w = 150, h = 46, y = H / 2 + 70; return [{ x: W / 2 - w - 8, y, w, h }, { x: W / 2 + 8, y, w, h }]; }
+
+function start(i) { sel = i; cur = GAMES[i]; parts = []; shake = 0; cur.over = false; cur.saved = false; cur.init(); ptr.on = false; }
+function toMenu() { cur = null; parts = []; }
+function onKey(code) {
+  if (!cur) {
+    if (code === 'ArrowLeft' || code === 'ArrowUp') sel = (sel + 2) % 3;
+    if (code === 'ArrowRight' || code === 'ArrowDown') sel = (sel + 1) % 3;
+    if (code === 'Enter' || code === 'Space') start(sel);
+    if (code === 'Digit1' || code === 'Digit2' || code === 'Digit3') start(+code.slice(-1) - 1);
+  } else if (code === 'Escape') toMenu();
+  else if (cur.over && (code === 'Enter' || code === 'Space')) start(sel);
+}
+function onTap(x, y) {
+  if (!cur) { for (let i = 0; i < 3; i++) if (inside(cardRect(i), x, y)) return start(i); }
+  else if (cur.over) { const [a, b] = overBtns(); if (inside(a, x, y)) start(sel); else if (inside(b, x, y)) toMenu(); }
+  else if (inside(menuBtn(), x, y)) toMenu();
+}
+C.addEventListener('pointermove', e => {
+  if (cur) return;
+  for (let i = 0; i < 3; i++) if (inside(cardRect(i), e.clientX, e.clientY)) sel = i;
+});
+
+function drawMenu(dt) {
+  mt += dt; skyGrad();
+  X.fillStyle = PAL.sun; X.globalAlpha = .9; X.beginPath(); X.arc(W * .78, H * .86, Math.min(W, H) * .16, 0, 7); X.fill(); X.globalAlpha = 1;
+  X.fillStyle = 'rgba(244,239,230,.08)';
+  for (const c of menuClouds) { c.x = (c.x + c.v * dt) % 1.2; const x = c.x * W * 1.2 - W * .1, y = c.y * H; X.beginPath(); X.arc(x, y, c.r, 0, 7); X.arc(x + c.r * .8, y + 8, c.r * .6, 0, 7); X.fill(); }
+  const narrow = W < 760;
+  txt('CLOUDLINE', W / 2, narrow ? 64 : H * .5 - 210, narrow ? 44 : 72, PAL.cream);
+  txt('하늘 아케이드 3종 · 기체를 골라 출격하세요', W / 2, narrow ? 104 : H * .5 - 160, narrow ? 14 : 17, PAL.hud, 'center', FK);
+  GAMES.forEach((g, i) => {
+    const r = cardRect(i), on = i === sel;
+    X.fillStyle = on ? 'rgba(244,239,230,.16)' : 'rgba(14,26,51,.55)'; rr(r.x, r.y, r.w, r.h, 10); X.fill();
+    X.strokeStyle = on ? PAL.gold : 'rgba(244,239,230,.2)'; X.lineWidth = on ? 2.5 : 1; rr(r.x, r.y, r.w, r.h, 10); X.stroke();
+    const bob = Math.sin(mt * 2 + i) * 4, b = best[i] || 0;
+    if (narrow) {
+      const ix = r.x + 52, iy = r.y + r.h / 2;
+      if (i === 1) rearPlane(ix, iy + bob, Math.sin(mt) * .3, .6); else plane(ix, iy + bob, i === 0 ? -Math.PI / 2 : mt, i === 2 ? PAL.cream : PAL.cream, 1.2);
+      txt(`${i + 1}  ${g.name}`, r.x + 100, r.y + 26, 18, on ? PAL.gold : PAL.cream, 'left');
+      txt(g.ko, r.x + 100, r.y + 52, 13, PAL.cream, 'left', FK);
+      txt(`최고 ${b}`, r.x + 100, r.y + 78, 12, PAL.hud, 'left', FK);
+    } else {
+      const ix = r.x + r.w / 2, iy = r.y + 72;
+      if (i === 1) rearPlane(ix, iy + bob, Math.sin(mt) * .3, .9); else plane(ix, iy + bob, i === 0 ? -Math.PI / 2 : mt, PAL.cream, 1.8);
+      txt(`0${i + 1}`, r.x + 18, r.y + 22, 14, PAL.hud, 'left');
+      txt(g.name, ix, r.y + 140, 22, on ? PAL.gold : PAL.cream);
+      txt(g.ko, ix, r.y + 168, 15, PAL.cream, 'center', FK);
+      txt(g.desc[0], ix, r.y + 198, 12, 'rgba(244,239,230,.75)', 'center', FK);
+      txt(g.desc[1], ix, r.y + 216, 12, 'rgba(244,239,230,.75)', 'center', FK);
+      txt(`최고 기록 ${b}`, ix, r.y + 250, 13, PAL.hud, 'center', FK);
+    }
+  });
+  const foot = narrow ? cardRect(2).y + 104 + 30 : cardRect(0).y + 280 + 34;
+  txt(narrow ? '카드를 눌러 출격' : '←→ 선택 · Enter 출격 · 플레이 중 Esc = 메뉴', W / 2, foot, 13, 'rgba(244,239,230,.6)', 'center', FK);
+  if (!narrow) txt(GAMES[sel].ctl, W / 2, foot + 22, 13, PAL.hud, 'center', FK);
+}
+
+function drawOver() {
+  const g = cur;
+  X.fillStyle = 'rgba(14,26,51,.7)'; X.fillRect(0, 0, W, H);
+  txt('격추되었습니다', W / 2, H / 2 - 70, 30, PAL.foe, 'center', FK);
+  txt(String(Math.floor(g.score)), W / 2, H / 2 - 18, 52, PAL.cream);
+  txt(g.newBest ? '새 최고 기록!' : `최고 기록 ${best[sel]}`, W / 2, H / 2 + 28, 15, PAL.gold, 'center', FK);
+  const [a, b] = overBtns();
+  X.fillStyle = PAL.gold; rr(a.x, a.y, a.w, a.h, 8); X.fill(); txt('다시 출격', a.x + a.w / 2, a.y + a.h / 2 + 1, 16, PAL.sky1, 'center', FK);
+  X.strokeStyle = PAL.cream; X.lineWidth = 1.5; rr(b.x, b.y, b.w, b.h, 8); X.stroke(); txt('메뉴로', b.x + b.w / 2, b.y + b.h / 2 + 1, 16, PAL.cream, 'center', FK);
+}
+
+let last = 0;
+function loop(ts) {
+  const dt = Math.min(.05, (ts - last) / 1000 || 0); last = ts;
+  X.save();
+  if (shake > 0) { X.translate(rnd(-shake, shake), rnd(-shake, shake)); shake *= .88; if (shake < .5) shake = 0; }
+  if (!cur) drawMenu(dt);
+  else {
+    if (!cur.over) cur.update(dt);
+    if (cur.over && !cur.saved) {
+      cur.saved = true; const s = Math.floor(cur.score);
+      cur.newBest = s > (best[sel] || 0);
+      if (cur.newBest) { best[sel] = s; try { localStorage.setItem('cloudline-best', JSON.stringify(best)); } catch {} }
+    }
+    stepParts(dt); cur.draw();
+    if (cur.over) drawOver();
+  }
+  X.restore();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
